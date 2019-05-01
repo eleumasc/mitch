@@ -16,9 +16,20 @@
          "guess_csrfs.js",
          "json-schema-infer.js",
          "classifier.min.js",
+         "intercept_requests.js",
          "background.js"
       ]
    },
+
+   "content_scripts": [{
+      "matches": [
+         "*://*/*"
+      ],
+      "all_frames": true,
+      "js": [
+         "content_script.js"
+      ]
+   }],
 
    "icons": {
       "48": "mitch48.png"
