@@ -1,15 +1,15 @@
 "use strict";
 
 var busy                         = false;
-var phase                        = 0;        // see from line 152 for the various phases
-var sensitive_requests           = [];       // this will be alice's first run
+var sensitive_requests           = [];       // this will be Alice's first run
+var phase                        = -1;       // see from line ~160 for the various phases
 var collected_sensitive_requests = 0;
 var collected_total_requests     = 0;
 var bob_requests                 = [];
 var alice1_requests              = [];
 var unauth_requests              = [];
 
-var active_collector = sensitive_requests;
+var active_collector;
 var request_interceptor;
 
 var classifier = new RandomForestClassifier();
@@ -40,32 +40,6 @@ function extractParams(urlSearchParams) {
    }, {});
 }
 
-function parseParams(requestData) {
-   const url = new URL(requestData.requestDetails.url);
-
-   const params = extractParams(new URLSearchParams(url.search));
-
-   if (requestData.requestDetails.method == "POST") {
-      if (requestData.requestDetails.requestBody != null) {
-         let postBody;
-         if (requestData.requestDetails.requestBody.formData) {
-            postBody = requestData.requestDetails.requestBody.formData;
-         } else {
-            const rawPostData = new Uint8Array(requestData.requestDetails.requestBody.raw[0].bytes);
-            const encodedPostData = String.fromCharCode.apply(null, rawPostData);
-            postBody = extractParams(new URLSearchParams("?" + decodeURIComponent(encodedPostData)));
-         }
-
-         return Array.from(Object.keys(postBody)).reduce((acc, cur) => {
-            acc[cur] = postBody[cur];
-            return acc;
-         }, params);
-      }
-   }
-
-   return params;
-}
-
 // Checks the number and the names of all the parameters of HTTP requests params1 and params2
 function sameParams(params1, params2) {
    const keys1 = Object.keys(params1), keys2 = Object.keys(params2);
@@ -83,11 +57,40 @@ function isKnown(request, requestsArray) {
 
 function parseRequest(requestData) {
    const url = new URL(requestData.requestDetails.url);
+
+   const params = extractParams(new URLSearchParams(url.search));
+   let postBody = "";
+   let isJson = false;
+
+   if (requestData.requestDetails.method != "GET" && !!requestData.requestDetails.requestBody) {
+      if (!!requestData.requestDetails.requestBody.formData) {
+         Object.assign(params, requestData.requestDetails.requestBody.formData);
+      }
+
+      if (!!requestData.requestDetails.requestBody.raw) {
+         postBody = requestData.requestDetails.requestBody.raw.map(
+            data => String.fromCharCode.apply(null, new Uint8Array(data.bytes))
+         ).join('');
+         try {
+            const jsonData = JSON.parse(postBody);
+            isJson = true;
+            for (let key in jsonData) {
+               params[key] = JSON.stringify(jsonData[key]);
+            }
+         } catch {
+            console.log("!!! Unknown request body format");
+            Object.assign(params, extractParams(new URLSearchParams("?" + decodeURIComponent(postBody))));
+         }
+      }
+   }
+
    return {
       reqId: requestData.requestDetails.requestId,
       method: requestData.requestDetails.method,
       url: url.protocol + "//" + url.hostname + url.pathname,
-      params: parseParams(requestData),
+      params: params,
+      isJson: isJson,
+      postBody: postBody,
       response: {
          body: requestData.responseBody,
          status: requestData.responseDetails.statusCode,
@@ -105,6 +108,7 @@ function requestHandler(requestData) {
       const pageUrl = new URL(requestData.requestDetails.originUrl || requestData.requestDetails.url);
       if (goodUrl(url, pageUrl)) {
          const request = parseRequest(requestData);
+         console.log(request);
          if (isSensitive(request) && !isKnown(request, active_collector)) {
             active_collector.push(request);
             collected_sensitive_requests++;
@@ -130,24 +134,34 @@ async function replayRequests(requestsArray) {
 
       xhr.open(request["method"], request["url"], async);
 
-      const paramString = [];
-      for (let k of Object.keys(request["params"])) {
-         paramString.push(k + "=" + encodeURI(request["params"][k]));
-      }
-
-      if (request["method"].toUpperCase() == "POST")
-         xhr.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
-
       const waitId = request_interceptor.requireWaitId();
       xhr.setRequestHeader("X-Mitch-WaitId", waitId);
 
-      xhr.send(paramString.join("&"));
+      if (request["method"].toUpperCase() != "GET") {
+         if (request["isJson"]) {
+            xhr.setRequestHeader("Content-Type", "application/json");
+         } else {
+            xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+         }
+         xhr.send(request["postBody"]);
+      } else {
+         const paramsString = [];
+         for (let key in request["params"]) {
+            paramsString.push(key + "=" + encodeURIComponent(request["params"][key]));
+         }
+         xhr.send(paramsString.join("&"));
+      }
 
       await request_interceptor.waitRequest(waitId);
    }
 }
 
-request_interceptor = interceptRequests(requestHandler);
+async function start_Alice1() {
+   active_collector = sensitive_requests;
+   request_interceptor = interceptRequests(requestHandler);
+   console.log("Intercepting requests...");
+   phase = 0;
+}
 
 async function finished_Alice1() {
    await request_interceptor.stop();
@@ -210,6 +224,9 @@ async function make_conclusions() {
 chrome.runtime.onMessage.addListener( async request => {
    if (request.type === "phase") {
       return phase;
+   } else if (request.type === "start_Alice1" && phase === -1) {
+      await start_Alice1();
+      return true;
    } else if (request.type === "collected_sensitive_requests") {
       return collected_sensitive_requests;
    } else if (request.type === "collected_total_requests") {

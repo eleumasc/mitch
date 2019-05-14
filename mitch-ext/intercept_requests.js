@@ -9,7 +9,7 @@ function interceptRequests(onRequest) {
    const textDecoder = new TextDecoder();
 
    const onBeforeRequestListener = requestDetails => {
-      if (acceptRequests) {
+      if (acceptRequests || !!requestWillBeCompleted[requestDetails.requestId]) {
          let responseBody = "";
 
          const filter = browser.webRequest.filterResponseData(requestDetails.requestId);
